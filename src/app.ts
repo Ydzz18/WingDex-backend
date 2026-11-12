@@ -6,6 +6,8 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { IdentificationResult } from './gemini.js';
 import { createAdminRouter } from './admin.js';
 import { createEbirdRouter, createEbirdTaxonomyLookup } from './ebird.js';
+import { createRegionalAchievementsRouter } from './regionalAchievements.js';
+import type { RegionalChecklistSnapshot } from './regionalChecklists.js';
 
 const maximumPhotoBytes = 10 * 1024 * 1024;
 const supportedMimeTypes = new Set([
@@ -29,10 +31,15 @@ export function createApp(options: {
   ebird?: {
     apiKey?: string;
     fetch?: typeof fetch;
+    getSupabase?: () => SupabaseClient;
   };
   admin?: {
     getSupabase?: () => SupabaseClient;
     adminUserIds?: string;
+    refreshChecklist?: (regionCode: string) => Promise<RegionalChecklistSnapshot>;
+  };
+  regionalAchievements?: {
+    getSupabase?: () => SupabaseClient;
   };
 }) {
   const app = express();
@@ -68,6 +75,13 @@ export function createApp(options: {
     legacyHeaders: false,
     message: { error: 'Too many eBird requests. Try again shortly.' },
   });
+  const regionalProgressLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 30,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: 'Regional rank sync limit reached. Try again shortly.' },
+  });
   const allowedOrigins = options.corsOrigins
     ?.split(',')
     .map((origin) => origin.trim())
@@ -77,8 +91,15 @@ export function createApp(options: {
   app.use(cors({ origin: allowedOrigins?.length ? allowedOrigins : '*' }));
   app.use(express.json({ limit: '32kb' }));
   app.get('/health', (_request, response) => response.json({ status: 'ok' }));
-  app.use('/admin', adminLimiter, createAdminRouter(options.admin));
+  app.use('/admin', adminLimiter, createAdminRouter({
+    ...options.admin,
+    ebirdApiKey: options.ebird?.apiKey,
+    fetch: options.ebird?.fetch,
+  }));
   app.use('/ebird', ebirdLimiter, createEbirdRouter(options.ebird, ebirdTaxonomyLookup));
+  app.use('/regional-ranks', regionalProgressLimiter, createRegionalAchievementsRouter({
+    getSupabase: options.regionalAchievements?.getSupabase ?? options.ebird?.getSupabase,
+  }));
   app.post('/identify', identifyLimiter, upload.single('photo'), async (request, response, next) => {
     if (!request.file) {
       response.status(400).json({ error: 'Choose a photo to identify.' });

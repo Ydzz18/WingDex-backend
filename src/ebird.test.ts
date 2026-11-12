@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { createApp } from './app.js';
+import { checklistHash } from './regionalChecklists.js';
 
 const identifyPhoto = vi.fn();
 
@@ -16,11 +18,27 @@ function createFetchMock(body: unknown = [], status = 200) {
   return { fetcher, calls };
 }
 
-function appFor(fetch?: typeof globalThis.fetch) {
+function appFor(
+  fetch?: typeof globalThis.fetch,
+  getSupabase?: () => SupabaseClient,
+) {
   return createApp({
     identifyPhoto,
-    ebird: { apiKey: 'test-ebird-key', fetch },
+    ebird: { apiKey: 'test-ebird-key', fetch, getSupabase },
   });
+}
+
+function checklistStore(row: Record<string, unknown>) {
+  return (() => ({
+    from() {
+      const builder = {
+        select() { return builder; },
+        eq() { return builder; },
+        async maybeSingle() { return { data: row, error: null }; },
+      };
+      return builder;
+    },
+  })) as unknown as () => SupabaseClient;
 }
 
 describe('eBird API proxy', () => {
@@ -84,5 +102,41 @@ describe('eBird API proxy', () => {
     expect(response.status).toBe(502);
     expect(response.text).not.toContain('private upstream details');
     expect(response.text).not.toContain('test-ebird-key');
+  });
+
+  it('exposes the current 18-region PSGC catalog and reads a published versioned snapshot', async () => {
+    const { fetcher, calls } = createFetchMock(['amecro', 'amerob']);
+    const speciesCodes = ['amecro', 'amerob'];
+    const hash = checklistHash(speciesCodes);
+    const app = appFor(fetcher, checklistStore({
+      region_code: 'NIR',
+      region_name: 'Negros Island Region',
+      eligible_species_count: 2,
+      checklist_version: `ebird-spplist:${hash}`,
+      checklist_snapshot_date: '2026-11-12',
+      checklist_hash: hash,
+      species_codes: speciesCodes,
+      source_region_codes: ['PH-NEC', 'PH-NER', 'PH-SIG'],
+      snapshot_as_of: '2026-11-12T08:00:00.000Z',
+    }));
+
+    const regions = await request(app).get('/ebird/regions/philippines');
+    expect(regions.status).toBe(200);
+    expect(regions.body.count).toBe(18);
+    expect(regions.body.regions.some((region: { code: string }) => region.code === 'NIR')).toBe(true);
+
+    const checklist = await request(app).get('/ebird/checklists/NIR/spplist');
+    expect(checklist.status).toBe(200);
+    expect(checklist.body.eligibleSpeciesCount).toBe(2);
+    expect(checklist.body.speciesCodes).toEqual(speciesCodes);
+    expect(checklist.body.valueHash).toBe(hash);
+    expect(checklist.body.version).toBe(`ebird-spplist:${hash}`);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('does not claim complete eBird denominators when a PSGC HUC lacks a verified eBird mapping', async () => {
+    const response = await request(appFor()).get('/ebird/checklists/REGION_IX/spplist');
+    expect(response.status).toBe(409);
+    expect(response.body.error).toContain('City of Isabela');
   });
 });

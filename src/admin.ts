@@ -1,11 +1,20 @@
 import { Router, type Request, type Response } from 'express';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
+import { findPhilippineRegion } from './philippineRegions.js';
+import {
+  createRegionalChecklistProvider,
+  RegionalChecklistSourceError,
+  type RegionalChecklistSnapshot,
+} from './regionalChecklists.js';
 import { getSupabaseClient } from './supabase.js';
 
 type AdminOptions = {
   getSupabase?: () => SupabaseClient;
   adminUserIds?: string;
+  ebirdApiKey?: string;
+  fetch?: typeof fetch;
+  refreshChecklist?: (regionCode: string) => Promise<RegionalChecklistSnapshot>;
 };
 
 const badgeInput = z.object({
@@ -91,6 +100,11 @@ async function handleDatabaseRequest<T>(
 export function createAdminRouter(options: AdminOptions = {}) {
   const router = Router();
   const getClient = options.getSupabase ?? getSupabaseClient;
+  const refreshChecklist = options.refreshChecklist
+    ?? createRegionalChecklistProvider({
+      apiKey: options.ebirdApiKey ?? process.env.EBIRD_API_KEY,
+      fetch: options.fetch,
+    }).refresh;
   const allowlistedUserIds = parseAllowlist(options.adminUserIds ?? process.env.ADMIN_USER_IDS);
 
   router.use(async (request: Request, response: Response, next) => {
@@ -161,6 +175,101 @@ export function createAdminRouter(options: AdminOptions = {}) {
         page_offset: (page - 1) * pageSize,
       }),
     );
+  });
+
+  router.get('/regional-rank-definitions', (_request, response) => {
+    const supabase = response.locals.adminSupabase as SupabaseClient;
+    void handleDatabaseRequest(response, () =>
+      supabase.from('regional_rank_definitions').select('*').order('rank_order', { ascending: true }),
+    );
+  });
+
+  router.get('/regional-rank-checklists', (_request, response) => {
+    const supabase = response.locals.adminSupabase as SupabaseClient;
+    void handleDatabaseRequest(response, () =>
+      supabase.from('regional_rank_checklists').select('*').order('snapshot_as_of', { ascending: false }).limit(1000),
+    );
+  });
+
+  router.post('/regional-rank-checklists/:regionCode/refresh', (request, response) => {
+    const parsedRegion = z.string().regex(/^[A-Z_]{2,12}$/i).safeParse(request.params.regionCode);
+    const region = parsedRegion.success ? findPhilippineRegion(parsedRegion.data) : undefined;
+    if (!region) {
+      response.status(400).json({ error: 'Choose a valid Philippine PSGC region code.' });
+      return;
+    }
+
+    void (async () => {
+      try {
+        const snapshot = await refreshChecklist(region.code);
+        const supabase = response.locals.adminSupabase as SupabaseClient;
+        const existing = await supabase
+          .from('regional_rank_checklists')
+          .select('*')
+          .eq('region_code', snapshot.regionCode)
+          .eq('checklist_version', snapshot.version)
+          .maybeSingle();
+        if (existing.error) {
+          sendDatabaseError(response, existing.error);
+          return;
+        }
+        if (existing.data) {
+          response.json({ ...existing.data, unchanged: true });
+          return;
+        }
+        const inserted = await supabase.from('regional_rank_checklists').insert({
+          region_code: snapshot.regionCode,
+          region_name: snapshot.regionName,
+          eligible_species_count: snapshot.eligibleSpeciesCount,
+          checklist_version: snapshot.version,
+          checklist_snapshot_date: snapshot.snapshotDate,
+          checklist_hash: snapshot.valueHash,
+          species_codes: snapshot.speciesCodes,
+          source_region_codes: snapshot.sourceRegionCodes,
+          snapshot_as_of: snapshot.asOf,
+          source: snapshot.source,
+          is_published: false,
+        }).select('*').single();
+        if (inserted.error) {
+          sendDatabaseError(response, inserted.error);
+          return;
+        }
+        response.status(201).json({ ...inserted.data, unchanged: false });
+      } catch (error) {
+        if (error instanceof RegionalChecklistSourceError) {
+          response.status(error.status).json({ error: error.message });
+          return;
+        }
+        sendDatabaseError(response);
+      }
+    })();
+  });
+
+  router.post('/regional-rank-checklists/:id/publish', (request, response) => {
+    const parsedId = z.string().uuid().safeParse(request.params.id);
+    if (!parsedId.success) {
+      response.status(400).json({ error: 'Invalid checklist snapshot identifier.' });
+      return;
+    }
+    const supabase = response.locals.adminSupabase as SupabaseClient;
+    void (async () => {
+      try {
+        const result = await supabase.rpc('admin_publish_regional_rank_checklist', {
+          p_checklist_id: parsedId.data,
+        });
+        if (result.error) {
+          sendDatabaseError(response, result.error);
+          return;
+        }
+        if (!result.data) {
+          response.status(404).json({ error: 'Checklist snapshot was not found.' });
+          return;
+        }
+        response.json({ id: parsedId.data, is_published: true });
+      } catch {
+        sendDatabaseError(response);
+      }
+    })();
   });
 
   const contentTables = ['badges', 'ranks', 'announcements'] as const;

@@ -1,5 +1,9 @@
 import { Router } from 'express';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
+import { findPhilippineRegion, philippineRegions } from './philippineRegions.js';
+import { validateStoredChecklistSnapshot } from './regionalChecklists.js';
+import { getSupabaseClient } from './supabase.js';
 
 const apiBaseUrl = 'https://api.ebird.org/v2';
 const taxonomyCacheTtl = 6 * 60 * 60 * 1000;
@@ -32,6 +36,7 @@ const geoQuerySchema = z.object({
 });
 const speciesCodeSchema = z.string().regex(/^[a-z0-9]{2,12}$/i);
 const regionCodeSchema = z.string().regex(/^[A-Z]{2,3}(?:-[A-Z0-9]{1,6}){0,3}$/i);
+const philippineRegionCodeSchema = z.string().regex(/^[A-Z_]{2,12}$/i);
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const parsed = new Date(`${value}T00:00:00.000Z`);
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
@@ -108,12 +113,13 @@ export function createEbirdTaxonomyLookup(options: { apiKey?: string; fetch?: ty
 }
 
 export function createEbirdRouter(
-  options: { apiKey?: string; fetch?: typeof fetch } = {},
+  options: { apiKey?: string; fetch?: typeof fetch; getSupabase?: () => SupabaseClient } = {},
   taxonomyLookup = createEbirdTaxonomyLookup(options),
 ) {
   const router = Router();
   const apiKey = options.apiKey?.trim();
   const request = options.fetch ?? fetch;
+  const getSupabase = options.getSupabase ?? getSupabaseClient;
   const cache = new Map<string, CachedResponse>();
 
   async function getJson<T>(path: string, params: URLSearchParams, ttl: number): Promise<T> {
@@ -273,6 +279,41 @@ export function createEbirdRouter(
     ));
   });
 
+  router.get('/checklists/:regionCode/spplist', (request, response) => {
+    const parsedRegion = philippineRegionCodeSchema.safeParse(request.params.regionCode);
+    if (!parsedRegion.success) {
+      response.status(400).json({ error: 'A valid Philippine PSGC region code is required.' });
+      return;
+    }
+    void handle(response, async () => {
+      const region = findPhilippineRegion(parsedRegion.data);
+      if (!region) throw new EbirdRequestError(400, 'Choose a valid Philippine PSGC region code.');
+      if ('unmappedAdministrativeUnits' in region && region.unmappedAdministrativeUnits.length > 0) {
+        throw new EbirdRequestError(
+          409,
+          `No verified all-time eBird mapping is available for ${region.unmappedAdministrativeUnits.join(', ')}.`,
+        );
+      }
+      try {
+        const client = getSupabase();
+        const { data, error } = await client
+          .from('regional_rank_checklists')
+          .select('*')
+          .eq('region_code', region.code)
+          .eq('is_published', true)
+          .maybeSingle();
+        if (error) throw error;
+        if (!data) throw new EbirdRequestError(404, `No published all-time checklist snapshot is available for ${region.name}.`);
+        const snapshot = validateStoredChecklistSnapshot(data as Record<string, unknown>);
+        if (!snapshot) throw new EbirdRequestError(503, 'The published regional checklist is incomplete. Ask an administrator to refresh it.');
+        return snapshot;
+      } catch (error) {
+        if (error instanceof EbirdRequestError) throw error;
+        throw new EbirdRequestError(503, 'The published regional checklist could not be loaded.');
+      }
+    });
+  });
+
   router.get('/checklists/:regionCode/:date', (request, response) => {
     const parsedRegion = regionCodeSchema.safeParse(request.params.regionCode);
     const parsedDate = dateSchema.safeParse(request.params.date);
@@ -283,6 +324,14 @@ export function createEbirdRouter(
     const [year, month, day] = parsedDate.data.split('-');
     const path = `/product/lists/${encodeURIComponent(parsedRegion.data)}/${year}/${month}/${day}`;
     void handle(response, () => getList(path, new URLSearchParams({ maxResults: '50' }), observationCacheTtl));
+  });
+
+  router.get('/regions/philippines', (_request, response) => {
+    void handle(response, async () => ({
+      count: philippineRegions.length,
+      regions: philippineRegions.map(({ code, name, psgc }) => ({ code, name, psgc })),
+      note: 'Official current PSA PSGC region list includes 18 entries, including NIR.',
+    }));
   });
 
   router.get('/hotspots/nearby', (request, response) => {
