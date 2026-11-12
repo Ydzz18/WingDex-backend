@@ -295,6 +295,7 @@ export function createEbirdRouter(
       lat: String(parsed.data.lat),
       lng: String(parsed.data.lng),
       dist: String(parsed.data.dist),
+      fmt: 'json',
     });
     void handle(response, () => getList('/ref/hotspot/geo', params, hotspotCacheTtl));
   });

@@ -68,6 +68,7 @@ describe('eBird API proxy', () => {
     expect(hotspots.status).toBe(200);
     expect(calls[0].url).toContain('/data/obs/geo/recent');
     expect(calls[1].url).toContain('/ref/hotspot/geo');
+    expect(new URL(calls[1].url).searchParams.get('fmt')).toBe('json');
   });
 
   it('serves regional recent checklists through the eBird products API', async () => {
