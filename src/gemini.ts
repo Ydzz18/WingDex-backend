@@ -1,6 +1,6 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import { z } from 'zod';
-import { birdRegions, type BirdRegion } from '../../src/data/regions.ts';
+import { birdRegions, type BirdRegion } from './data/regions.ts';
 
 export type IdentificationResult = {
   commonName: string | null;
