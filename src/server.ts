@@ -22,7 +22,7 @@ const client = new GoogleGenAI({
   },
 });
 const app = createApp({
-  identifyPhoto: createGeminiIdentifier(client, process.env.GEMINI_MODEL ?? 'gemini-flash-latest'),
+  identifyPhoto: createGeminiIdentifier(client, process.env.GEMINI_MODEL ?? 'gemini-3.5-flash-lite'),
   corsOrigins: process.env.CORS_ORIGIN,
   ebird: {
     apiKey: process.env.EBIRD_API_KEY,
