@@ -10,6 +10,7 @@ import { createRegionalAchievementsRouter } from './regionalAchievements.js';
 import type { RegionalChecklistSnapshot } from './regionalChecklists.js';
 
 const maximumPhotoBytes = 10 * 1024 * 1024;
+const maximumTaxonomyWaitMs = 1_000;
 const supportedMimeTypes = new Set([
   'image/jpeg',
   'image/png',
@@ -107,18 +108,30 @@ export function createApp(options: {
     }
 
     try {
-      const taxonomyPromise = ebirdTaxonomyLookup.getTaxonomy().then(
-        () => ({ ok: true as const }),
-        (error: unknown) => ({ ok: false as const, error }),
-      );
       const result = await options.identifyPhoto(request.file.buffer, request.file.mimetype);
       if (!result.commonName && !result.scientificName) {
         response.json(result);
         return;
       }
 
+      const taxonomyPromise = ebirdTaxonomyLookup.getTaxonomy().then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      const taxonomyResult = await Promise.race([
+        taxonomyPromise,
+        new Promise<null>((resolve) => {
+          timeoutId = setTimeout(() => resolve(null), maximumTaxonomyWaitMs);
+        }),
+      ]);
+      if (timeoutId) clearTimeout(timeoutId);
+      if (!taxonomyResult) {
+        response.json({ ...result, ebirdSpecies: null });
+        return;
+      }
+
       try {
-        const taxonomyResult = await taxonomyPromise;
         if (!taxonomyResult.ok) throw taxonomyResult.error;
         const ebirdSpecies = await ebirdTaxonomyLookup.findByName(result.commonName, result.scientificName);
         response.json({ ...result, ebirdSpecies });
@@ -147,6 +160,11 @@ export function createApp(options: {
       response.status(status).json({
         error: status === 413 ? 'Photo must be 10 MB or smaller.' : 'Upload one photo in the photo field.',
       });
+      return;
+    }
+
+    if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+      response.status(504).json({ error: 'Bird identification timed out. Try again with a smaller, clearer photo.' });
       return;
     }
 

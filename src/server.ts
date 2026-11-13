@@ -14,7 +14,13 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error('PORT must be a valid port number.');
 }
 
-const client = new GoogleGenAI({ apiKey });
+const client = new GoogleGenAI({
+  apiKey,
+  httpOptions: {
+    timeout: 20_000,
+    retryOptions: { attempts: 2, initialDelay: 0.5, maxDelay: 1 },
+  },
+});
 const app = createApp({
   identifyPhoto: createGeminiIdentifier(client, process.env.GEMINI_MODEL ?? 'gemini-flash-latest'),
   corsOrigins: process.env.CORS_ORIGIN,

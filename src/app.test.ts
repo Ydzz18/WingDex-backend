@@ -50,10 +50,10 @@ describe('POST /identify', () => {
     expect(fetchCount).toBe(1);
   });
 
-  it('fetches eBird taxonomy while Gemini analyzes the photo', async () => {
+  it('starts the eBird taxonomy lookup after Gemini identifies a bird', async () => {
     let taxonomyFetchStarted = false;
     const identifyPhoto = vi.fn().mockImplementation(async () => {
-      expect(taxonomyFetchStarted).toBe(true);
+      expect(taxonomyFetchStarted).toBe(false);
       return {
         commonName: 'Atlantic Puffin',
         scientificName: 'Fratercula arctica',
@@ -80,6 +80,44 @@ describe('POST /identify', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.ebirdSpecies.speciesCode).toBe('atlpuf');
+    expect(taxonomyFetchStarted).toBe(true);
+  });
+
+  it('returns an identification without waiting for a slow eBird taxonomy lookup', async () => {
+    let resolveTaxonomy!: (response: Response) => void;
+    const taxonomyResponse = new Promise<Response>((resolve) => {
+      resolveTaxonomy = resolve;
+    });
+    const response = await request(createApp({
+      identifyPhoto: vi.fn().mockResolvedValue({
+        commonName: 'Atlantic Puffin',
+        scientificName: 'Fratercula arctica',
+        description: 'A seabird with a colorful bill.',
+        confidence: 0.91,
+        regions: ['Europe'],
+      }),
+      ebird: { apiKey: 'test-key', fetch: () => taxonomyResponse },
+    }))
+      .post('/identify')
+      .attach('photo', photo, { filename: 'bird.jpg', contentType: 'image/jpeg' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.commonName).toBe('Atlantic Puffin');
+    expect(response.body.ebirdSpecies).toBeNull();
+    resolveTaxonomy(new Response(JSON.stringify([])));
+  });
+
+  it('returns a clear timeout when the identifier exceeds its deadline', async () => {
+    const timeoutError = new Error('request aborted');
+    timeoutError.name = 'AbortError';
+    const response = await request(createApp({
+      identifyPhoto: vi.fn().mockRejectedValue(timeoutError),
+    }))
+      .post('/identify')
+      .attach('photo', photo, { filename: 'bird.jpg', contentType: 'image/jpeg' });
+
+    expect(response.status).toBe(504);
+    expect(response.body.error).toContain('timed out');
   });
 
   it('keeps a successful identification when eBird is unavailable', async () => {
