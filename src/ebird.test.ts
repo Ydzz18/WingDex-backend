@@ -152,6 +152,31 @@ describe('eBird API proxy', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('resolves a published region checklist to eBird species in checklist order', async () => {
+    const speciesCodes = ['amecro', 'amerob'];
+    const hash = checklistHash(speciesCodes);
+    const { fetcher, calls } = createFetchMock([
+      { speciesCode: 'amerob', comName: 'American Robin', sciName: 'Turdus migratorius', category: 'species' },
+      { speciesCode: 'amecro', comName: 'American Crow', sciName: 'Corvus brachyrhynchos', category: 'species' },
+    ]);
+    const response = await request(appFor(fetcher, checklistStore({
+      region_code: 'NIR',
+      region_name: 'Negros Island Region',
+      eligible_species_count: speciesCodes.length,
+      checklist_version: `ebird-spplist:${hash}`,
+      checklist_snapshot_date: '2026-11-12',
+      checklist_hash: hash,
+      species_codes: speciesCodes,
+      source_region_codes: ['PH-NEC', 'PH-NER', 'PH-SIG'],
+      snapshot_as_of: '2026-11-12T08:00:00.000Z',
+    }))).get('/ebird/checklists/NIR/species');
+
+    expect(response.status).toBe(200);
+    expect(response.body.species.map((species: { speciesCode: string }) => species.speciesCode)).toEqual(speciesCodes);
+    expect(response.body.species[0].comName).toBe('American Crow');
+    expect(calls).toHaveLength(1);
+  });
+
   it('does not claim complete eBird denominators when a PSGC HUC lacks a verified eBird mapping', async () => {
     const response = await request(appFor()).get('/ebird/checklists/REGION_IX/spplist');
     expect(response.status).toBe(409);

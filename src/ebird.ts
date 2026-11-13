@@ -324,6 +324,52 @@ export function createEbirdRouter(
     });
   });
 
+  router.get('/checklists/:regionCode/species', (request, response) => {
+    const parsedRegion = philippineRegionCodeSchema.safeParse(request.params.regionCode);
+    if (!parsedRegion.success) {
+      response.status(400).json({ error: 'A valid Philippine PSGC region code is required.' });
+      return;
+    }
+    void handle(response, async () => {
+      const region = findPhilippineRegion(parsedRegion.data);
+      if (!region) throw new EbirdRequestError(400, 'Choose a valid Philippine PSGC region code.');
+      if ('unmappedAdministrativeUnits' in region && region.unmappedAdministrativeUnits.length > 0) {
+        throw new EbirdRequestError(
+          409,
+          `No verified all-time eBird mapping is available for ${region.unmappedAdministrativeUnits.join(', ')}.`,
+        );
+      }
+
+      let snapshot;
+      try {
+        const client = getSupabase();
+        const { data, error } = await client
+          .from('regional_rank_checklists')
+          .select('*')
+          .eq('region_code', region.code)
+          .eq('is_published', true)
+          .maybeSingle();
+        if (error) throw error;
+        if (!data) throw new EbirdRequestError(404, `No published all-time checklist snapshot is available for ${region.name}.`);
+        snapshot = validateStoredChecklistSnapshot(data as Record<string, unknown>);
+        if (!snapshot) throw new EbirdRequestError(503, 'The published regional checklist is incomplete. Ask an administrator to refresh it.');
+      } catch (error) {
+        if (error instanceof EbirdRequestError) throw error;
+        throw new EbirdRequestError(503, 'The published regional checklist could not be loaded.');
+      }
+
+      const taxonomy = await taxonomyLookup.getTaxonomy();
+      const speciesByCode = new Map(taxonomy.map((species) => [species.speciesCode.toLowerCase(), species]));
+      const species = snapshot.speciesCodes
+        .map((code) => speciesByCode.get(code.toLowerCase()))
+        .filter((bird): bird is EbirdTaxon => bird !== undefined);
+      if (species.length !== snapshot.speciesCodes.length) {
+        throw new EbirdRequestError(503, 'The regional checklist does not match the current eBird taxonomy. Please try again later.');
+      }
+      return { ...snapshot, species };
+    });
+  });
+
   router.get('/checklists/:regionCode/:date', (request, response) => {
     const parsedRegion = regionCodeSchema.safeParse(request.params.regionCode);
     const parsedDate = dateSchema.safeParse(request.params.date);
