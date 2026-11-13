@@ -52,43 +52,53 @@ export function createEbirdTaxonomyLookup(options: { apiKey?: string; fetch?: ty
   const apiKey = options.apiKey?.trim();
   const request = options.fetch ?? fetch;
   let cachedTaxonomy: { expiresAt: number; taxonomy: EbirdTaxon[] } | undefined;
+  let taxonomyRequest: Promise<EbirdTaxon[]> | undefined;
 
   async function getTaxonomy(): Promise<EbirdTaxon[]> {
     if (!apiKey) {
       throw new EbirdRequestError(503, 'eBird data is unavailable. Configure EBIRD_API_KEY on the backend.');
     }
     if (cachedTaxonomy && cachedTaxonomy.expiresAt > Date.now()) return cachedTaxonomy.taxonomy;
+    if (taxonomyRequest) return taxonomyRequest;
 
-    let response: Response;
-    try {
-      response = await request(
-        `${apiBaseUrl}/ref/taxonomy/ebird?fmt=json&locale=en&cat=species`,
-        {
-          headers: { 'X-eBirdApiToken': apiKey },
-          signal: AbortSignal.timeout(12_000),
-        },
-      );
-    } catch {
-      throw new EbirdRequestError(502, 'Could not reach eBird. Please try again.');
-    }
-    if (response.status === 429) {
-      throw new EbirdRequestError(429, 'eBird request limit reached. Please try again later.');
-    }
-    if (!response.ok) {
-      throw new EbirdRequestError(502, 'eBird could not complete this request. Please try again.');
-    }
+    taxonomyRequest = (async () => {
+      let response: Response;
+      try {
+        response = await request(
+          `${apiBaseUrl}/ref/taxonomy/ebird?fmt=json&locale=en&cat=species`,
+          {
+            headers: { 'X-eBirdApiToken': apiKey },
+            signal: AbortSignal.timeout(12_000),
+          },
+        );
+      } catch {
+        throw new EbirdRequestError(502, 'Could not reach eBird. Please try again.');
+      }
+      if (response.status === 429) {
+        throw new EbirdRequestError(429, 'eBird request limit reached. Please try again later.');
+      }
+      if (!response.ok) {
+        throw new EbirdRequestError(502, 'eBird could not complete this request. Please try again.');
+      }
 
-    let taxonomy: unknown;
+      let taxonomy: unknown;
+      try {
+        taxonomy = await response.json();
+      } catch {
+        throw new EbirdRequestError(502, 'eBird returned an unreadable species taxonomy.');
+      }
+      if (!Array.isArray(taxonomy)) {
+        throw new EbirdRequestError(502, 'eBird returned an invalid species taxonomy.');
+      }
+      cachedTaxonomy = { expiresAt: Date.now() + taxonomyCacheTtl, taxonomy: taxonomy as EbirdTaxon[] };
+      return cachedTaxonomy.taxonomy;
+    })();
+
     try {
-      taxonomy = await response.json();
-    } catch {
-      throw new EbirdRequestError(502, 'eBird returned an unreadable species taxonomy.');
+      return await taxonomyRequest;
+    } finally {
+      taxonomyRequest = undefined;
     }
-    if (!Array.isArray(taxonomy)) {
-      throw new EbirdRequestError(502, 'eBird returned an invalid species taxonomy.');
-    }
-    cachedTaxonomy = { expiresAt: Date.now() + taxonomyCacheTtl, taxonomy: taxonomy as EbirdTaxon[] };
-    return cachedTaxonomy.taxonomy;
   }
 
   const normalizeName = (name: string) => name.toLocaleLowerCase().replace(/[^a-z0-9]/g, '');

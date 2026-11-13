@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createApp } from './app.js';
+import { createEbirdTaxonomyLookup } from './ebird.js';
 import { checklistHash } from './regionalChecklists.js';
 
 const identifyPhoto = vi.fn();
@@ -42,6 +43,23 @@ function checklistStore(row: Record<string, unknown>) {
 }
 
 describe('eBird API proxy', () => {
+  it('shares an in-flight taxonomy fetch across simultaneous lookups', async () => {
+    let resolveFetch!: (response: Response) => void;
+    const fetcher: typeof fetch = vi.fn(() => new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    }));
+    const taxonomyLookup = createEbirdTaxonomyLookup({ apiKey: 'test-ebird-key', fetch: fetcher });
+
+    const firstLookup = taxonomyLookup.getTaxonomy();
+    const secondLookup = taxonomyLookup.getTaxonomy();
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    resolveFetch(new Response(JSON.stringify([
+      { speciesCode: 'amerob', comName: 'American Robin', sciName: 'Turdus migratorius', category: 'species' },
+    ])));
+    await expect(Promise.all([firstLookup, secondLookup])).resolves.toHaveLength(2);
+  });
+
   it('requires an eBird key without revealing upstream credentials', async () => {
     const app = createApp({ identifyPhoto });
     const response = await request(app).get('/ebird/taxonomy?q=robin');

@@ -107,6 +107,10 @@ export function createApp(options: {
     }
 
     try {
+      const taxonomyPromise = ebirdTaxonomyLookup.getTaxonomy().then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
       const result = await options.identifyPhoto(request.file.buffer, request.file.mimetype);
       if (!result.commonName && !result.scientificName) {
         response.json(result);
@@ -114,6 +118,8 @@ export function createApp(options: {
       }
 
       try {
+        const taxonomyResult = await taxonomyPromise;
+        if (!taxonomyResult.ok) throw taxonomyResult.error;
         const ebirdSpecies = await ebirdTaxonomyLookup.findByName(result.commonName, result.scientificName);
         response.json({ ...result, ebirdSpecies });
       } catch (error) {
