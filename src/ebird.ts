@@ -51,21 +51,23 @@ class EbirdRequestError extends Error {
 export function createEbirdTaxonomyLookup(options: { apiKey?: string; fetch?: typeof fetch } = {}) {
   const apiKey = options.apiKey?.trim();
   const request = options.fetch ?? fetch;
-  let cachedTaxonomy: { expiresAt: number; taxonomy: EbirdTaxon[] } | undefined;
-  let taxonomyRequest: Promise<EbirdTaxon[]> | undefined;
+  const cachedTaxonomies = new Map<boolean, { expiresAt: number; taxonomy: EbirdTaxon[] }>();
+  const taxonomyRequests = new Map<boolean, Promise<EbirdTaxon[]>>();
 
-  async function getTaxonomy(): Promise<EbirdTaxon[]> {
+  async function loadTaxonomy(includeAllCategories: boolean): Promise<EbirdTaxon[]> {
     if (!apiKey) {
       throw new EbirdRequestError(503, 'eBird data is unavailable. Configure EBIRD_API_KEY on the backend.');
     }
-    if (cachedTaxonomy && cachedTaxonomy.expiresAt > Date.now()) return cachedTaxonomy.taxonomy;
-    if (taxonomyRequest) return taxonomyRequest;
+    const cached = cachedTaxonomies.get(includeAllCategories);
+    if (cached && cached.expiresAt > Date.now()) return cached.taxonomy;
+    const inFlight = taxonomyRequests.get(includeAllCategories);
+    if (inFlight) return inFlight;
 
-    taxonomyRequest = (async () => {
+    const taxonomyRequest = (async () => {
       let response: Response;
       try {
         response = await request(
-          `${apiBaseUrl}/ref/taxonomy/ebird?fmt=json&locale=en&cat=species`,
+          `${apiBaseUrl}/ref/taxonomy/ebird?fmt=json&locale=en${includeAllCategories ? '' : '&cat=species'}`,
           {
             headers: { 'X-eBirdApiToken': apiKey },
             signal: AbortSignal.timeout(12_000),
@@ -90,21 +92,31 @@ export function createEbirdTaxonomyLookup(options: { apiKey?: string; fetch?: ty
       if (!Array.isArray(taxonomy)) {
         throw new EbirdRequestError(502, 'eBird returned an invalid species taxonomy.');
       }
-      cachedTaxonomy = { expiresAt: Date.now() + taxonomyCacheTtl, taxonomy: taxonomy as EbirdTaxon[] };
-      return cachedTaxonomy.taxonomy;
+      const result = taxonomy as EbirdTaxon[];
+      cachedTaxonomies.set(includeAllCategories, {
+        expiresAt: Date.now() + taxonomyCacheTtl,
+        taxonomy: result,
+      });
+      return result;
     })();
+    taxonomyRequests.set(includeAllCategories, taxonomyRequest);
 
     try {
       return await taxonomyRequest;
     } finally {
-      taxonomyRequest = undefined;
+      if (taxonomyRequests.get(includeAllCategories) === taxonomyRequest) {
+        taxonomyRequests.delete(includeAllCategories);
+      }
     }
   }
 
+  const getTaxonomy = () => loadTaxonomy(false);
+  const getCompleteTaxonomy = () => loadTaxonomy(true);
   const normalizeName = (name: string) => name.toLocaleLowerCase().replace(/[^a-z0-9]/g, '');
 
   return {
     getTaxonomy,
+    getCompleteTaxonomy,
     async findByName(commonName: string | null, scientificName: string | null) {
       const taxonomy = await getTaxonomy();
       const normalizedScientificName = scientificName ? normalizeName(scientificName) : '';
@@ -117,7 +129,10 @@ export function createEbirdTaxonomyLookup(options: { apiKey?: string; fetch?: ty
     },
     async findBySpeciesCode(speciesCode: string) {
       const taxonomy = await getTaxonomy();
-      return taxonomy.find((bird) => bird.speciesCode.toLowerCase() === speciesCode.toLowerCase()) ?? null;
+      const species = taxonomy.find((bird) => bird.speciesCode.toLowerCase() === speciesCode.toLowerCase());
+      if (species) return species;
+      const completeTaxonomy = await getCompleteTaxonomy();
+      return completeTaxonomy.find((bird) => bird.speciesCode.toLowerCase() === speciesCode.toLowerCase()) ?? null;
     },
   };
 }
@@ -358,7 +373,7 @@ export function createEbirdRouter(
         throw new EbirdRequestError(503, 'The published regional checklist could not be loaded.');
       }
 
-      const taxonomy = await taxonomyLookup.getTaxonomy();
+      const taxonomy = await taxonomyLookup.getCompleteTaxonomy();
       const speciesByCode = new Map(taxonomy.map((species) => [species.speciesCode.toLowerCase(), species]));
       const species = snapshot.speciesCodes
         .map((code) => speciesByCode.get(code.toLowerCase()))

@@ -177,6 +177,32 @@ describe('eBird API proxy', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('resolves regional checklist forms and hybrids from the complete taxonomy', async () => {
+    const speciesCodes = ['palcud1', 'x01041'];
+    const hash = checklistHash(speciesCodes);
+    const { fetcher, calls } = createFetchMock([
+      { speciesCode: 'x01041', comName: 'Night Heron Hybrid', sciName: 'Nycticorax hybrid', category: 'hybrid' },
+      { speciesCode: 'palcud1', comName: 'Palawan Cuckoo-Dove Form', sciName: 'Macropygia form', category: 'form' },
+    ]);
+    const response = await request(appFor(fetcher, checklistStore({
+      region_code: 'NCR',
+      region_name: 'National Capital Region',
+      eligible_species_count: speciesCodes.length,
+      checklist_version: `ebird-spplist:${hash}`,
+      checklist_snapshot_date: '2026-11-13',
+      checklist_hash: hash,
+      species_codes: speciesCodes,
+      source_region_codes: ['PH-NCR'],
+      snapshot_as_of: '2026-11-13T08:00:00.000Z',
+    }))).get('/ebird/checklists/NCR/species');
+
+    expect(response.status).toBe(200);
+    expect(response.body.species.map((species: { speciesCode: string }) => species.speciesCode)).toEqual(speciesCodes);
+    expect(response.body.species.map((species: { category: string }) => species.category)).toEqual(['form', 'hybrid']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe('https://api.ebird.org/v2/ref/taxonomy/ebird?fmt=json&locale=en');
+  });
+
   it('does not claim complete eBird denominators when a PSGC HUC lacks a verified eBird mapping', async () => {
     const response = await request(appFor()).get('/ebird/checklists/REGION_IX/spplist');
     expect(response.status).toBe(409);
