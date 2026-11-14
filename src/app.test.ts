@@ -50,6 +50,24 @@ describe('POST /identify', () => {
     expect(fetchCount).toBe(1);
   });
 
+  it('accepts forwarded client IPs from the hosting proxy', async () => {
+    const identifyPhoto = vi.fn().mockResolvedValue({
+      commonName: null,
+      scientificName: null,
+      description: null,
+      confidence: 0,
+      regions: [],
+    });
+
+    const response = await request(createApp({ identifyPhoto }))
+      .post('/identify')
+      .set('X-Forwarded-For', '203.0.113.42')
+      .attach('photo', photo, { filename: 'bird.jpg', contentType: 'image/jpeg' });
+
+    expect(response.status).toBe(200);
+    expect(identifyPhoto).toHaveBeenCalledWith(photo, 'image/jpeg');
+  });
+
   it('starts the eBird taxonomy lookup after Gemini identifies a bird', async () => {
     let taxonomyFetchStarted = false;
     const identifyPhoto = vi.fn().mockImplementation(async () => {

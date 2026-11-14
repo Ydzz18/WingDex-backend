@@ -44,6 +44,7 @@ export function createApp(options: {
   };
 }) {
   const app = express();
+  app.set('trust proxy', 1);
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: maximumPhotoBytes, files: 1, fields: 0 },
